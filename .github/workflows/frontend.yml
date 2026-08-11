@@ -64,6 +64,11 @@ jobs:
             REPO_URL=https://github.com/CloudTechDevOps/Java-springboot-project.git
 
             echo "🚀 Starting deployment..."
+            echo "📦 Installing Git..."
+            sudo dnf install -y git
+
+            echo "Git version:"
+            git --version
 
             mkdir -p $APP_DIR
             cd $APP_DIR
