@@ -1,165 +1,548 @@
-name: Frontend to EC2
+# name: Frontend to EC2
+
+# on:
+#   # push:
+#   #   branches:
+#   #     - main
+
+#   workflow_dispatch:
+
+# jobs:
+#   deploy:
+#     runs-on: ubuntu-latest
+
+#     steps:
+#       - name: Checkout Repository
+#         uses: actions/checkout@v4
+
+#       ######################################################
+#       # SonarQube Scan
+#       ######################################################
+
+#       # - name: Set up Java
+#       #   uses: actions/setup-java@v4
+#       #   with:
+#       #     distribution: temurin
+#       #     java-version: 17
+
+#       # - name: SonarQube Scan
+#       #   uses: SonarSource/sonarqube-scan-action@v5
+#       #   env:
+#       #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+#       #     SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+#       #   with:
+#       #     args: >
+#       #       -Dsonar.projectKey=frontend
+#       #       -Dsonar.projectName=frontend
+#       #       -Dsonar.sources=frontend
+
+#       # ######################################################
+#       # # Quality Gate
+#       # ######################################################
+
+#       # - name: SonarQube Quality Gate
+#       #   uses: SonarSource/sonarqube-quality-gate-action@v1.2.0
+#       #   timeout-minutes: 10
+#       #   env:
+#       #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+#       ######################################################
+#       # Deploy
+#       ######################################################
+
+#       - name: Deploy via SSH
+#         uses: appleboy/ssh-action@v1.1.0
+#         with:
+#           host: ${{ secrets.EC2_HOST_NAME_FRONTEND }}
+#           username: ec2-user
+#           key: ${{ secrets.EC2_PRIVATE_KEY }}
+#           script: |
+#             set -e
+
+#             APP_DIR=/home/ec2-user/front
+#             REPO_NAME=Java-springboot-project
+#             REPO_URL=https://github.com/CloudTechDevOps/Java-springboot-project.git
+
+#             echo "🚀 Starting deployment..."
+#             echo "📦 Installing Git..."
+#             sudo dnf install -y git
+
+#             echo "Git version:"
+#             git --version
+
+#             mkdir -p $APP_DIR
+#             cd $APP_DIR
+
+#             if [ -d "$REPO_NAME/.git" ]; then
+#               cd $REPO_NAME
+#               git fetch origin 
+#               git reset --hard origin/main
+#               git clean -fd
+#             else
+#               git clone $REPO_URL
+#               cd $REPO_NAME
+#             fi
+
+#             sudo dnf install -y python3 python3-pip
+
+#             cd frontend
+
+#             if [ ! -d "venv" ]; then
+#               python3 -m venv venv
+#             fi
+
+#             source venv/bin/activate
+
+#             pip install --upgrade pip
+#             pip install -r requirements.txt
+
+#             sudo tee /etc/systemd/system/frontend.service > /dev/null <<EOF
+#             [Unit]
+#             Description=Streamlit Frontend App
+#             After=network.target
+
+#             [Service]
+#             User=ec2-user
+#             WorkingDirectory=/home/ec2-user/front/Java-springboot-project/frontend
+
+#             ExecStart=/bin/bash -c 'source /home/ec2-user/front/Java-springboot-project/frontend/venv/bin/activate && streamlit run app.py --server.port=8501 --server.address=0.0.0.0'
+
+#             Environment=API_URL=http://172.31.12.145:8084
+
+#             Restart=always
+#             RestartSec=5
+
+#             StandardOutput=append:/home/ec2-user/frontend.log
+#             StandardError=append:/home/ec2-user/frontend-error.log
+
+#             [Install]
+#             WantedBy=multi-user.target
+#             EOF
+
+#             sudo systemctl daemon-reload
+#             sudo systemctl enable frontend
+#             sudo systemctl restart frontend
+
+#             echo "Deployment completed."
+
+#       ######################################################
+#       # Email Notification
+#       ######################################################
+
+#       - name: 📧 Send Deployment Report
+#         if: success() || failure()
+#         uses: dawidd6/action-send-mail@v3
+#         with:
+#           server_address: smtp.gmail.com
+#           server_port: 465
+#           secure: true
+#           username: ${{ secrets.EMAIL_USERNAME }}
+#           password: ${{ secrets.EMAIL_PASSWORD }}
+#           subject: AI Deployment Report - ${{ github.repository }}
+#           to: ${{ secrets.EMAIL_TO }}
+#           from: ${{ secrets.EMAIL_USERNAME }}
+
+#           body: |
+#             🚀 AI Deployment Report
+
+#             Repository : ${{ github.repository }}
+#             Workflow   : ${{ github.workflow }}
+#             Branch     : ${{ github.ref_name }}
+#             Commit     : ${{ github.sha }}
+
+#             Status     : ${{ job.status }}
+
+#             Triggered By : ${{ github.actor }}
+#             Run Number   : ${{ github.run_number }}
+
+#             SonarQube Analysis : Completed
+#             Quality Gate       : Passed
+
+#             Deployment Target  : EC2
+#             Frontend URL       : http://${{ secrets.EC2_HOST }}:8501
+
+#             Regards,
+#             GitHub Actions
+
+###above code with sonarqube code without running dockerfile###
+
+name: Build and Deploy Full Application
 
 on:
-  # push:
-  #   branches:
-  #     - main
+  push:
+    branches:
+      - main
 
-  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-southeast-1
+
+  BACKEND_REPOSITORY: my-spring-app
+  FRONTEND_REPOSITORY: my-streamlit-app
+
+  BACKEND_CONTAINER: my-spring-app
+  FRONTEND_CONTAINER: my-streamlit-app
+
+  BACKEND_PORT: 8084
+  FRONTEND_PORT: 8501
 
 jobs:
-  deploy:
+
+  build-and-deploy:
+
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+
+      # ==================================================
+      # 1. Checkout GitHub repository
+      # ==================================================
+
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      ######################################################
-      # SonarQube Scan
-      ######################################################
 
-      # - name: Set up Java
-      #   uses: actions/setup-java@v4
-      #   with:
-      #     distribution: temurin
-      #     java-version: 17
+      # ==================================================
+      # 2. Configure AWS
+      # ==================================================
 
-      # - name: SonarQube Scan
-      #   uses: SonarSource/sonarqube-scan-action@v5
-      #   env:
-      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      #     SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-      #   with:
-      #     args: >
-      #       -Dsonar.projectKey=frontend
-      #       -Dsonar.projectName=frontend
-      #       -Dsonar.sources=frontend
-
-      # ######################################################
-      # # Quality Gate
-      # ######################################################
-
-      # - name: SonarQube Quality Gate
-      #   uses: SonarSource/sonarqube-quality-gate-action@v1.2.0
-      #   timeout-minutes: 10
-      #   env:
-      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
-      ######################################################
-      # Deploy
-      ######################################################
-
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.1.0
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
         with:
-          host: ${{ secrets.EC2_HOST_NAME_FRONTEND }}
-          username: ec2-user
-          key: ${{ secrets.EC2_PRIVATE_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ==================================================
+      # 3. Login to ECR
+      # ==================================================
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+
+      # ==================================================
+      # 4. Create Backend ECR repository
+      # ==================================================
+
+      - name: Create backend ECR repository
+        run: |
+          aws ecr describe-repositories \
+            --repository-names "$BACKEND_REPOSITORY" \
+            --region "$AWS_REGION" \
+          || aws ecr create-repository \
+            --repository-name "$BACKEND_REPOSITORY" \
+            --region "$AWS_REGION"
+
+
+      # ==================================================
+      # 5. Create Frontend ECR repository
+      # ==================================================
+
+      - name: Create frontend ECR repository
+        run: |
+          aws ecr describe-repositories \
+            --repository-names "$FRONTEND_REPOSITORY" \
+            --region "$AWS_REGION" \
+          || aws ecr create-repository \
+            --repository-name "$FRONTEND_REPOSITORY" \
+            --region "$AWS_REGION"
+
+
+      # ==================================================
+      # 6. Build Backend Docker Image
+      # ==================================================
+
+      - name: Build backend Docker image
+        run: |
+          docker build \
+            -t "$BACKEND_REPOSITORY:latest" \
+            .
+
+
+      # ==================================================
+      # 7. Tag Backend Image
+      # ==================================================
+
+      - name: Tag backend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker tag \
+            "$BACKEND_REPOSITORY:latest" \
+            "$ECR_REGISTRY/$BACKEND_REPOSITORY:latest"
+
+
+      # ==================================================
+      # 8. Push Backend Image
+      # ==================================================
+
+      - name: Push backend image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push \
+            "$ECR_REGISTRY/$BACKEND_REPOSITORY:latest"
+
+
+      # ==================================================
+      # 9. Build Frontend Docker Image
+      # ==================================================
+
+      - name: Build frontend Docker image
+        working-directory: frontend
+        run: |
+          docker build \
+            -t "$FRONTEND_REPOSITORY:latest" \
+            .
+
+
+      # ==================================================
+      # 10. Tag Frontend Image
+      # ==================================================
+
+      - name: Tag frontend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker tag \
+            "$FRONTEND_REPOSITORY:latest" \
+            "$ECR_REGISTRY/$FRONTEND_REPOSITORY:latest"
+
+
+      # ==================================================
+      # 11. Push Frontend Image
+      # ==================================================
+
+      - name: Push frontend image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker push \
+            "$ECR_REGISTRY/$FRONTEND_REPOSITORY:latest"
+
+
+      # ==================================================
+      # 12. Deploy Everything to EC2
+      # ==================================================
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+
           script: |
+
             set -e
 
-            APP_DIR=/home/ec2-user/front
-            REPO_NAME=Java-springboot-project
-            REPO_URL=https://github.com/CloudTechDevOps/Java-springboot-project.git
 
-            echo "🚀 Starting deployment..."
-            echo "📦 Installing Git..."
-            sudo dnf install -y git
+            # ==================================================
+            # INSTALL DOCKER
+            # ==================================================
 
-            echo "Git version:"
-            git --version
+            echo "Checking Docker..."
 
-            mkdir -p $APP_DIR
-            cd $APP_DIR
+            if ! command -v docker >/dev/null 2>&1
+            then
 
-            if [ -d "$REPO_NAME/.git" ]; then
-              cd $REPO_NAME
-              git fetch origin 
-              git reset --hard origin/main
-              git clean -fd
+              echo "Docker not found. Installing..."
+
+              if command -v dnf >/dev/null 2>&1
+              then
+                sudo dnf update -y
+                sudo dnf install -y docker
+
+              elif command -v yum >/dev/null 2>&1
+              then
+                sudo yum update -y
+                sudo yum install -y docker
+
+              else
+                echo "Unsupported Linux distribution"
+                exit 1
+              fi
+
+              sudo systemctl enable docker
+              sudo systemctl start docker
+
             else
-              git clone $REPO_URL
-              cd $REPO_NAME
+
+              echo "Docker already installed."
+
+              sudo systemctl start docker || true
+
             fi
 
-            sudo dnf install -y python3 python3-pip
 
-            cd frontend
+            # ==================================================
+            # INSTALL AWS CLI
+            # ==================================================
 
-            if [ ! -d "venv" ]; then
-              python3 -m venv venv
+            echo "Checking AWS CLI..."
+
+            if ! command -v aws >/dev/null 2>&1
+            then
+
+              echo "AWS CLI not found. Installing..."
+
+              if command -v dnf >/dev/null 2>&1
+              then
+                sudo dnf install -y awscli
+
+              elif command -v yum >/dev/null 2>&1
+              then
+                sudo yum install -y awscli
+
+              else
+                echo "Unsupported Linux distribution"
+                exit 1
+              fi
+
+            else
+
+              echo "AWS CLI already installed."
+
             fi
 
-            source venv/bin/activate
 
-            pip install --upgrade pip
-            pip install -r requirements.txt
+            # ==================================================
+            # CHECK DOCKER
+            # ==================================================
 
-            sudo tee /etc/systemd/system/frontend.service > /dev/null <<EOF
-            [Unit]
-            Description=Streamlit Frontend App
-            After=network.target
+            echo "Docker version:"
+            sudo docker --version
 
-            [Service]
-            User=ec2-user
-            WorkingDirectory=/home/ec2-user/front/Java-springboot-project/frontend
+            echo "AWS CLI version:"
+            aws --version
 
-            ExecStart=/bin/bash -c 'source /home/ec2-user/front/Java-springboot-project/frontend/venv/bin/activate && streamlit run app.py --server.port=8501 --server.address=0.0.0.0'
 
-            Environment=API_URL=http://172.31.12.145:8084
+            # ==================================================
+            # LOGIN TO ECR
+            # ==================================================
 
-            Restart=always
-            RestartSec=5
+            echo "Logging into ECR..."
 
-            StandardOutput=append:/home/ec2-user/frontend.log
-            StandardError=append:/home/ec2-user/frontend-error.log
+            aws ecr get-login-password \
+              --region ap-southeast-1 \
+              | sudo docker login \
+              --username AWS \
+              --password-stdin \
+              ${{ steps.login-ecr.outputs.registry }}
 
-            [Install]
-            WantedBy=multi-user.target
-            EOF
 
-            sudo systemctl daemon-reload
-            sudo systemctl enable frontend
-            sudo systemctl restart frontend
+            # ==================================================
+            # PULL BACKEND IMAGE
+            # ==================================================
 
-            echo "Deployment completed."
+            echo "Pulling backend image..."
 
-      ######################################################
-      # Email Notification
-      ######################################################
+            sudo docker pull \
+              ${{ steps.login-ecr.outputs.registry }}/my-spring-app:latest
 
-      - name: 📧 Send Deployment Report
-        if: success() || failure()
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 465
-          secure: true
-          username: ${{ secrets.EMAIL_USERNAME }}
-          password: ${{ secrets.EMAIL_PASSWORD }}
-          subject: AI Deployment Report - ${{ github.repository }}
-          to: ${{ secrets.EMAIL_TO }}
-          from: ${{ secrets.EMAIL_USERNAME }}
 
-          body: |
-            🚀 AI Deployment Report
+            # ==================================================
+            # PULL FRONTEND IMAGE
+            # ==================================================
 
-            Repository : ${{ github.repository }}
-            Workflow   : ${{ github.workflow }}
-            Branch     : ${{ github.ref_name }}
-            Commit     : ${{ github.sha }}
+            echo "Pulling frontend image..."
 
-            Status     : ${{ job.status }}
+            sudo docker pull \
+              ${{ steps.login-ecr.outputs.registry }}/my-streamlit-app:latest
 
-            Triggered By : ${{ github.actor }}
-            Run Number   : ${{ github.run_number }}
 
-            SonarQube Analysis : Completed
-            Quality Gate       : Passed
+            # ==================================================
+            # STOP OLD BACKEND
+            # ==================================================
 
-            Deployment Target  : EC2
-            Frontend URL       : http://${{ secrets.EC2_HOST }}:8501
+            echo "Stopping old backend..."
 
-            Regards,
-            GitHub Actions
+            sudo docker stop my-spring-app || true
+
+            sudo docker rm my-spring-app || true
+
+
+            # ==================================================
+            # STOP OLD FRONTEND
+            # ==================================================
+
+            echo "Stopping old frontend..."
+
+            sudo docker stop my-streamlit-app || true
+
+            sudo docker rm my-streamlit-app || true
+
+
+            # ==================================================
+            # START BACKEND
+            # ==================================================
+
+            echo "Starting backend..."
+
+            sudo docker run -d \
+              --name my-spring-app \
+              --restart unless-stopped \
+              -p 8084:8084 \
+              -e SPRING_DATASOURCE_URL="${{ secrets.SPRING_DATASOURCE_URL }}" \
+              -e SPRING_DATASOURCE_USERNAME="${{ secrets.SPRING_DATASOURCE_USERNAME }}" \
+              -e SPRING_DATASOURCE_PASSWORD="${{ secrets.SPRING_DATASOURCE_PASSWORD }}" \
+              -e SPRING_JPA_HIBERNATE_DDL_AUTO="update" \
+              -e SERVER_PORT="8084" \
+              ${{ steps.login-ecr.outputs.registry }}/my-spring-app:latest
+
+
+            # ==================================================
+            # START FRONTEND
+            # ==================================================
+
+            echo "Starting frontend..."
+
+            sudo docker run -d \
+              --name my-streamlit-app \
+              --restart unless-stopped \
+              -p 8501:8501 \
+              -e API_URL="http://172.31.27.84:8084" \
+              ${{ steps.login-ecr.outputs.registry }}/my-streamlit-app:latest
+
+
+            # ==================================================
+            # SHOW CONTAINERS
+            # ==================================================
+
+            echo "======================================"
+            echo "Running containers"
+            echo "======================================"
+
+            sudo docker ps
+
+
+            # ==================================================
+            # BACKEND LOGS
+            # ==================================================
+
+            echo "======================================"
+            echo "Backend logs"
+            echo "======================================"
+
+            sudo docker logs \
+              --tail 30 \
+              my-spring-app
+
+
+            # ==================================================
+            # FRONTEND LOGS
+            # ==================================================
+
+            echo "======================================"
+            echo "Frontend logs"
+            echo "======================================"
+
+            sudo docker logs \
+              --tail 30 \
+              my-streamlit-app
+
