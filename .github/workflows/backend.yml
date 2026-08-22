@@ -175,66 +175,268 @@
 
 
 
-name: Build and Deploy
+name: Build and Deploy Backend
 
 on:
   # push:
   #   branches:
   #     - main
- workflow_dispatch:
+  workflow_dispatch:
+
+# Required for GitHub OIDC authentication with AWS
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: my-spring-app
+  CONTAINER_NAME: my-spring-app
+  CONTAINER_PORT: 8084
 
 jobs:
   build-and-deploy:
+
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+
+      # ============================================
+      # 1. Checkout source code
+      # ============================================
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
 
+      # ============================================
+      # 2. Configure AWS credentials using OIDC
+      # ============================================
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+
+      # ============================================
+      # 3. Login to Amazon ECR
+      # ============================================
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+
+      # ============================================
+      # 4. Create ECR repository if it doesn't exist
+      # ============================================
+      - name: Create ECR repository
+        run: |
+          aws ecr describe-repositories \
+            --repository-names "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+          || aws ecr create-repository \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION"
+
+
+      # ============================================
+      # 5. Build Docker image
+      # ============================================
       - name: Build Docker image
         run: |
-          docker build -t my-spring-app .
+          docker build \
+            -t "$ECR_REPOSITORY:latest" \
+            .
 
+
+      # ============================================
+      # 6. Tag Docker image
+      # ============================================
       - name: Tag Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker tag my-spring-app:latest \
-            ${{ steps.login-ecr.outputs.registry }}/my-spring-app:latest
+          docker tag \
+            "$ECR_REPOSITORY:latest" \
+            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
+
+      # ============================================
+      # 7. Push Docker image to ECR
+      # ============================================
       - name: Push Docker image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           docker push \
-            ${{ steps.login-ecr.outputs.registry }}/my-spring-app:latest
+            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
+
+      # ============================================
+      # 8. Deploy to EC2
+      # ============================================
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
+
           script: |
-            aws ecr get-login-password --region us-east-1 | \
-              docker login --username AWS --password-stdin \
+
+            # ========================================
+            # Install Docker if not installed
+            # ========================================
+
+            if ! command -v docker >/dev/null 2>&1
+            then
+              echo "Docker not found. Installing..."
+
+              if command -v dnf >/dev/null 2>&1
+              then
+                sudo dnf install -y docker
+
+              elif command -v yum >/dev/null 2>&1
+              then
+                sudo yum install -y docker
+
+              else
+                echo "Unsupported Linux distribution."
+                exit 1
+              fi
+
+              sudo systemctl enable docker
+              sudo systemctl start docker
+
+            else
+              echo "Docker already installed."
+            fi
+
+
+            # ========================================
+            # Install AWS CLI if not installed
+            # ========================================
+
+            if ! command -v aws >/dev/null 2>&1
+            then
+              echo "AWS CLI not found. Installing..."
+
+              if command -v dnf >/dev/null 2>&1
+              then
+                sudo dnf install -y awscli
+
+              elif command -v yum >/dev/null 2>&1
+              then
+                sudo yum install -y awscli
+
+              else
+                echo "Unsupported Linux distribution."
+                exit 1
+              fi
+
+            else
+              echo "AWS CLI already installed."
+            fi
+
+
+            # ========================================
+            # Start Docker
+            # ========================================
+
+            sudo systemctl start docker
+
+
+            # ========================================
+            # Display versions
+            # ========================================
+
+            echo "Docker:"
+            sudo docker --version
+
+            echo "AWS CLI:"
+            aws --version
+
+
+            # ========================================
+            # Login to ECR
+            # ========================================
+
+            echo "Logging into ECR..."
+
+            aws ecr get-login-password \
+              --region ap-southeast-1 \
+              | sudo docker login \
+              --username AWS \
+              --password-stdin \
               ${{ steps.login-ecr.outputs.registry }}
 
-            docker pull \
+
+            # ========================================
+            # Pull latest backend image
+            # ========================================
+
+            echo "Pulling latest Docker image..."
+
+            sudo docker pull \
               ${{ steps.login-ecr.outputs.registry }}/my-spring-app:latest
 
-            docker stop my-spring-app || true
-            docker rm my-spring-app || true
 
-            docker run -d \
+            # ========================================
+            # Stop existing container
+            # ========================================
+
+            echo "Stopping existing container..."
+
+            sudo docker stop my-spring-app || true
+
+
+            # ========================================
+            # Remove existing container
+            # ========================================
+
+            echo "Removing existing container..."
+
+            sudo docker rm my-spring-app || true
+
+
+            # ========================================
+            # Start new backend container
+            # ========================================
+
+            echo "Starting new backend container..."
+
+            sudo docker run -d \
               --name my-spring-app \
+              --restart unless-stopped \
               -p 8084:8084 \
+              -e SPRING_DATASOURCE_URL='${{ secrets.SPRING_DATASOURCE_URL }}' \
+              -e SPRING_DATASOURCE_USERNAME='${{ secrets.SPRING_DATASOURCE_USERNAME }}' \
+              -e SPRING_DATASOURCE_PASSWORD='${{ secrets.SPRING_DATASOURCE_PASSWORD }}' \
+              -e SPRING_JPA_HIBERNATE_DDL_AUTO='update' \
+              -e SERVER_PORT='8084' \
               ${{ steps.login-ecr.outputs.registry }}/my-spring-app:latest
+
+
+            # ========================================
+            # Check container
+            # ========================================
+
+            echo "================================"
+            echo "Container status"
+            echo "================================"
+
+            sudo docker ps
+
+
+            # ========================================
+            # Show application logs
+            # ========================================
+
+            echo "================================"
+            echo "Application logs"
+            echo "================================"
+
+            sudo docker logs \
+              --tail 50 \
+              my-spring-app
 
