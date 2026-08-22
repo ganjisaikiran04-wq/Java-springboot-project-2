@@ -166,29 +166,30 @@
 
 ###above code with sonarqube code without running dockerfile###
 
-name: Build and Deploy Full Application
+name: Build and Deploy Frontend
 
 on:
+  workflow_dispatch:
+
+  # Uncomment this if you want automatic deployment
+  # whenever you push to main.
+  #
   # push:
   #   branches:
   #     - main
-  workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
   AWS_REGION: ap-southeast-1
+  ECR_REPOSITORY: my-streamlit-app
+  CONTAINER_NAME: my-streamlit-app
+  CONTAINER_PORT: 8501
 
-  BACKEND_REPOSITORY: my-spring-app
-  FRONTEND_REPOSITORY: my-streamlit-app
-
+  # Backend container running on the SAME EC2 instance
   BACKEND_CONTAINER: my-spring-app
-  FRONTEND_CONTAINER: my-streamlit-app
-
-  BACKEND_PORT: 8084
-  FRONTEND_PORT: 8501
+  DOCKER_NETWORK: app-network
 
 jobs:
 
@@ -198,17 +199,17 @@ jobs:
 
     steps:
 
-      # ==================================================
-      # 1. Checkout GitHub repository
-      # ==================================================
+      # ============================================
+      # 1. Checkout source code
+      # ============================================
 
       - name: Checkout source
         uses: actions/checkout@v4
 
 
-      # ==================================================
-      # 2. Configure AWS
-      # ==================================================
+      # ============================================
+      # 2. Configure AWS credentials
+      # ============================================
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
@@ -218,121 +219,83 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
 
-      # ==================================================
-      # 3. Login to ECR
-      # ==================================================
+      # ============================================
+      # 3. Test AWS credentials
+      # ============================================
+
+      - name: Test AWS credentials
+        run: |
+          aws sts get-caller-identity
+
+
+      # ============================================
+      # 4. Create ECR repository if it doesn't exist
+      # ============================================
+
+      - name: Create ECR repository
+        run: |
+          aws ecr describe-repositories \
+            --repository-names "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+          || aws ecr create-repository \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION"
+
+
+      # ============================================
+      # 5. Login to Amazon ECR
+      # ============================================
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
 
-      # ==================================================
-      # 4. Create Backend ECR repository
-      # ==================================================
-
-      - name: Create backend ECR repository
-        run: |
-          aws ecr describe-repositories \
-            --repository-names "$BACKEND_REPOSITORY" \
-            --region "$AWS_REGION" \
-          || aws ecr create-repository \
-            --repository-name "$BACKEND_REPOSITORY" \
-            --region "$AWS_REGION"
-
-
-      # ==================================================
-      # 5. Create Frontend ECR repository
-      # ==================================================
-
-      - name: Create frontend ECR repository
-        run: |
-          aws ecr describe-repositories \
-            --repository-names "$FRONTEND_REPOSITORY" \
-            --region "$AWS_REGION" \
-          || aws ecr create-repository \
-            --repository-name "$FRONTEND_REPOSITORY" \
-            --region "$AWS_REGION"
-
-
-      # ==================================================
-      # 6. Build Backend Docker Image
-      # ==================================================
-
-      - name: Build backend Docker image
-        run: |
-          docker build \
-            -t "$BACKEND_REPOSITORY:latest" \
-            .
-
-
-      # ==================================================
-      # 7. Tag Backend Image
-      # ==================================================
-
-      - name: Tag backend image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          docker tag \
-            "$BACKEND_REPOSITORY:latest" \
-            "$ECR_REGISTRY/$BACKEND_REPOSITORY:latest"
-
-
-      # ==================================================
-      # 8. Push Backend Image
-      # ==================================================
-
-      - name: Push backend image to ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        run: |
-          docker push \
-            "$ECR_REGISTRY/$BACKEND_REPOSITORY:latest"
-
-
-      # ==================================================
-      # 9. Build Frontend Docker Image
-      # ==================================================
+      # ============================================
+      # 6. Build Frontend Docker Image
+      #
+      # IMPORTANT:
+      # Dockerfile is inside frontend/
+      # ============================================
 
       - name: Build frontend Docker image
         working-directory: frontend
         run: |
           docker build \
-            -t "$FRONTEND_REPOSITORY:latest" \
+            -t "$ECR_REPOSITORY:latest" \
             .
 
 
-      # ==================================================
-      # 10. Tag Frontend Image
-      # ==================================================
+      # ============================================
+      # 7. Tag Frontend Docker Image
+      # ============================================
 
-      - name: Tag frontend image
+      - name: Tag frontend Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           docker tag \
-            "$FRONTEND_REPOSITORY:latest" \
-            "$ECR_REGISTRY/$FRONTEND_REPOSITORY:latest"
+            "$ECR_REPOSITORY:latest" \
+            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
 
-      # ==================================================
-      # 11. Push Frontend Image
-      # ==================================================
+      # ============================================
+      # 8. Push Frontend Image to ECR
+      # ============================================
 
-      - name: Push frontend image to ECR
+      - name: Push frontend Docker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
           docker push \
-            "$ECR_REGISTRY/$FRONTEND_REPOSITORY:latest"
+            "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
 
-      # ==================================================
-      # 12. Deploy Everything to EC2
-      # ==================================================
+      # ============================================
+      # 9. Deploy Frontend to EC2
+      # ============================================
 
-      - name: Deploy to EC2
+      - name: Deploy frontend to EC2
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -343,10 +306,14 @@ jobs:
 
             set -e
 
+            echo "========================================"
+            echo "Starting frontend deployment"
+            echo "========================================"
 
-            # ==================================================
-            # INSTALL DOCKER
-            # ==================================================
+
+            # ========================================
+            # Install Docker if not installed
+            # ========================================
 
             echo "Checking Docker..."
 
@@ -357,17 +324,21 @@ jobs:
 
               if command -v dnf >/dev/null 2>&1
               then
+
                 sudo dnf update -y
                 sudo dnf install -y docker
 
               elif command -v yum >/dev/null 2>&1
               then
+
                 sudo yum update -y
                 sudo yum install -y docker
 
               else
-                echo "Unsupported Linux distribution"
+
+                echo "Unsupported Linux distribution."
                 exit 1
+
               fi
 
               sudo systemctl enable docker
@@ -377,14 +348,21 @@ jobs:
 
               echo "Docker already installed."
 
-              sudo systemctl start docker || true
-
             fi
 
 
-            # ==================================================
-            # INSTALL AWS CLI
-            # ==================================================
+            # ========================================
+            # Start Docker
+            # ========================================
+
+            echo "Starting Docker..."
+
+            sudo systemctl start docker
+
+
+            # ========================================
+            # Install AWS CLI if not installed
+            # ========================================
 
             echo "Checking AWS CLI..."
 
@@ -395,15 +373,19 @@ jobs:
 
               if command -v dnf >/dev/null 2>&1
               then
+
                 sudo dnf install -y awscli
 
               elif command -v yum >/dev/null 2>&1
               then
+
                 sudo yum install -y awscli
 
               else
-                echo "Unsupported Linux distribution"
+
+                echo "Unsupported Linux distribution."
                 exit 1
+
               fi
 
             else
@@ -413,22 +395,34 @@ jobs:
             fi
 
 
-            # ==================================================
-            # CHECK DOCKER
-            # ==================================================
+            # ========================================
+            # Display versions
+            # ========================================
 
-            echo "Docker version:"
+            echo "========================================"
+            echo "Docker version"
+            echo "========================================"
+
             sudo docker --version
 
-            echo "AWS CLI version:"
+
+            echo "========================================"
+            echo "AWS CLI version"
+            echo "========================================"
+
             aws --version
 
 
-            # ==================================================
-            # LOGIN TO ECR
-            # ==================================================
+            # ========================================
+            # Login to ECR
+            #
+            # EC2 IAM ROLE is used here.
+            # No AWS keys are required on EC2.
+            # ========================================
 
-            echo "Logging into ECR..."
+            echo "========================================"
+            echo "Logging into ECR"
+            echo "========================================"
 
             aws ecr get-login-password \
               --region ap-southeast-1 \
@@ -438,113 +432,165 @@ jobs:
               ${{ steps.login-ecr.outputs.registry }}
 
 
-            # ==================================================
-            # PULL BACKEND IMAGE
-            # ==================================================
+            # ========================================
+            # Create Docker network
+            # ========================================
 
-            echo "Pulling backend image..."
+            echo "========================================"
+            echo "Creating Docker network"
+            echo "========================================"
 
-            sudo docker pull \
-              ${{ steps.login-ecr.outputs.registry }}/my-spring-app:latest
+            sudo docker network create app-network || true
 
 
-            # ==================================================
-            # PULL FRONTEND IMAGE
-            # ==================================================
+            # ========================================
+            # Check backend container
+            # ========================================
 
-            echo "Pulling frontend image..."
+            echo "========================================"
+            echo "Checking backend container"
+            echo "========================================"
+
+            if sudo docker ps -a \
+              --format '{{.Names}}' \
+              | grep -q "^my-spring-app$"
+            then
+
+              echo "Backend container exists."
+
+            else
+
+              echo "WARNING: Backend container my-spring-app does not exist."
+
+              echo "Make sure backend.yml has been deployed first."
+
+            fi
+
+
+            # ========================================
+            # Connect backend to Docker network
+            # ========================================
+
+            echo "========================================"
+            echo "Connecting backend to Docker network"
+            echo "========================================"
+
+            if sudo docker ps -a \
+              --format '{{.Names}}' \
+              | grep -q "^my-spring-app$"
+            then
+
+              sudo docker network connect \
+                app-network \
+                my-spring-app \
+                2>/dev/null || true
+
+            fi
+
+
+            # ========================================
+            # Pull latest frontend image
+            # ========================================
+
+            echo "========================================"
+            echo "Pulling latest frontend image"
+            echo "========================================"
 
             sudo docker pull \
               ${{ steps.login-ecr.outputs.registry }}/my-streamlit-app:latest
 
 
-            # ==================================================
-            # STOP OLD BACKEND
-            # ==================================================
+            # ========================================
+            # Stop old frontend container
+            # ========================================
 
-            echo "Stopping old backend..."
-
-            sudo docker stop my-spring-app || true
-
-            sudo docker rm my-spring-app || true
-
-
-            # ==================================================
-            # STOP OLD FRONTEND
-            # ==================================================
-
-            echo "Stopping old frontend..."
+            echo "========================================"
+            echo "Stopping old frontend container"
+            echo "========================================"
 
             sudo docker stop my-streamlit-app || true
+
+
+            # ========================================
+            # Remove old frontend container
+            # ========================================
+
+            echo "========================================"
+            echo "Removing old frontend container"
+            echo "========================================"
 
             sudo docker rm my-streamlit-app || true
 
 
-            # ==================================================
-            # START BACKEND
-            # ==================================================
+            # ========================================
+            # Start new frontend container
+            # ========================================
 
-            echo "Starting backend..."
-
-            sudo docker run -d \
-              --name my-spring-app \
-              --restart unless-stopped \
-              -p 8084:8084 \
-              -e SPRING_DATASOURCE_URL="${{ secrets.SPRING_DATASOURCE_URL }}" \
-              -e SPRING_DATASOURCE_USERNAME="${{ secrets.SPRING_DATASOURCE_USERNAME }}" \
-              -e SPRING_DATASOURCE_PASSWORD="${{ secrets.SPRING_DATASOURCE_PASSWORD }}" \
-              -e SPRING_JPA_HIBERNATE_DDL_AUTO="update" \
-              -e SERVER_PORT="8084" \
-              ${{ steps.login-ecr.outputs.registry }}/my-spring-app:latest
-
-
-            # ==================================================
-            # START FRONTEND
-            # ==================================================
-
-            echo "Starting frontend..."
+            echo "========================================"
+            echo "Starting Streamlit frontend"
+            echo "========================================"
 
             sudo docker run -d \
               --name my-streamlit-app \
               --restart unless-stopped \
+              --network app-network \
               -p 8501:8501 \
-              -e API_URL="http://172.31.27.84:8084" \
+              -e API_URL="http://my-spring-app:8084" \
               ${{ steps.login-ecr.outputs.registry }}/my-streamlit-app:latest
 
 
-            # ==================================================
-            # SHOW CONTAINERS
-            # ==================================================
+            # ========================================
+            # Wait for Streamlit
+            # ========================================
 
-            echo "======================================"
+            echo "Waiting for frontend to start..."
+
+            sleep 10
+
+
+            # ========================================
+            # Container status
+            # ========================================
+
+            echo "========================================"
             echo "Running containers"
-            echo "======================================"
+            echo "========================================"
 
             sudo docker ps
 
 
-            # ==================================================
-            # BACKEND LOGS
-            # ==================================================
+            # ========================================
+            # Network status
+            # ========================================
 
-            echo "======================================"
-            echo "Backend logs"
-            echo "======================================"
+            echo "========================================"
+            echo "Docker network"
+            echo "========================================"
 
-            sudo docker logs \
-              --tail 30 \
-              my-spring-app
+            sudo docker network inspect app-network
 
 
-            # ==================================================
-            # FRONTEND LOGS
-            # ==================================================
+            # ========================================
+            # Frontend logs
+            # ========================================
 
-            echo "======================================"
-            echo "Frontend logs"
-            echo "======================================"
+            echo "========================================"
+            echo "Frontend application logs"
+            echo "========================================"
 
             sudo docker logs \
-              --tail 30 \
+              --tail 50 \
               my-streamlit-app
+
+
+            # ========================================
+            # Deployment completed
+            # ========================================
+
+            echo "========================================"
+            echo "Frontend deployment completed"
+            echo "========================================"
+
+            echo "Access Streamlit at:"
+            echo "http://YOUR-EC2-PUBLIC-IP:8501"
 
