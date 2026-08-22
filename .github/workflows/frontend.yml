@@ -169,9 +169,10 @@
 name: Build and Deploy Full Application
 
 on:
-  push:
-    branches:
-      - main
+  # push:
+  #   branches:
+  #     - main
+  workflow_dispatch:
 
 permissions:
   contents: read
